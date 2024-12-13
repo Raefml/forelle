@@ -136,6 +136,19 @@ class ForelleScraper:
                         self.product_urls.add(product_url)
                         self.logger.info(f"Product {index}: URL captured - {product_url}")
 
+                        try:
+                            swatch_more = WebDriverWait(article, 1).until(
+                                EC.presence_of_all_elements_located((By.CSS_SELECTOR, "a.variant-filter__swatch-item"))
+                            )
+                            if swatch_more:
+                                for swatch in swatch_more:
+                                    swatch_url = swatch.get_attribute('href')
+                                    if swatch_url:
+                                        self.product_urls.add(swatch_url)
+                                        self.logger.info(f"Product {index}: Swatch URL captured - {swatch_url}")
+                        except TimeoutException:
+                            self.logger.warning(f"Product {index}: No swatches found or failed to load swatches.")
+
                 except Exception as e:
                     self.logger.error(f"Error while extracting product {index}: {e}")
 
