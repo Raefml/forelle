@@ -1,8 +1,10 @@
 import os
+from typing import List, Dict
 import csv
-import time
 import logging
+import time
 from typing import List
+from itertools import product
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
@@ -11,6 +13,8 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException
 from webdriver_manager.chrome import ChromeDriverManager
+import requests
+import re
 
 
 class ForelleScraper:
@@ -127,7 +131,7 @@ class ForelleScraper:
 
             for index, article in enumerate(product_articles, 1):
                 try:
-                    product_url = self.driver.execute_script("""
+                    product_url = self.driver.execute_script("""  
                         var link = arguments[0].querySelector('a.product-title, a.product-image');
                         return link ? link.href : null;
                     """, article)
@@ -135,19 +139,6 @@ class ForelleScraper:
                     if product_url:
                         self.product_urls.add(product_url)
                         self.logger.info(f"Product {index}: URL captured - {product_url}")
-
-                        try:
-                            swatch_more = WebDriverWait(article, 1).until(
-                                EC.presence_of_all_elements_located((By.CSS_SELECTOR, "a.variant-filter__swatch-item"))
-                            )
-                            if swatch_more:
-                                for swatch in swatch_more:
-                                    swatch_url = swatch.get_attribute('href')
-                                    if swatch_url:
-                                        self.product_urls.add(swatch_url)
-                                        self.logger.info(f"Product {index}: Swatch URL captured - {swatch_url}")
-                        except TimeoutException:
-                            self.logger.warning(f"Product {index}: No swatches found or failed to load swatches.")
 
                 except Exception as e:
                     self.logger.error(f"Error while extracting product {index}: {e}")
@@ -187,7 +178,156 @@ class ForelleScraper:
             self.driver.quit()
 
 
+class ForelleVariantScraper:
+    def __init__(self, base_url: str = "https://www.forelle.com"):
+        chrome_options = Options()
+        chrome_options.add_argument("--headless")
+        chrome_options.add_argument("--no-sandbox")
+        chrome_options.add_argument("--disable-dev-shm-usage")
+
+        self.service = Service(ChromeDriverManager().install())
+        self.driver = webdriver.Chrome(service=self.service, options=chrome_options)
+        self.session = requests.Session()
+
+        self.base_url = base_url
+        self.variant_urls = set()
+
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s - %(levelname)s: %(message)s',
+            handlers=[
+                logging.FileHandler('forelle_variant_scraping.log'),
+                logging.StreamHandler()
+            ]
+        )
+        self.logger = logging.getLogger(__name__)
+
+    def _extract_product_id(self, url: str) -> str:
+        match = re.search(r'/p/[^/]+/(\d+)/', url)
+        if match:
+            return match.group(1)
+
+        parts = url.split('/')
+        for i, part in enumerate(parts):
+            if part.isdigit():
+                return part
+
+        self.logger.error(f"Impossible d'extraire l'ID du produit de l'URL : {url}")
+        return ""
+
+    def get_product_variants(self, product_url: str) -> List[Dict]:
+        product_id = self._extract_product_id(product_url)
+        if not product_id:
+            self.logger.error(f"ID de produit non trouvé pour {product_url}")
+            return []
+
+        variant_filter_url = f"{self.base_url}/en_US/api/v1/product/v2/{product_id}/variant-filter/"
+        response = self.session.get(variant_filter_url)
+
+        if response.status_code == 200:
+            return response.json()
+        else:
+            self.logger.error(f"Échec de la récupération des variants pour {product_url}. Code de statut : {response.status_code}")
+            return []
+
+    def generate_variant_urls(self, product_url: str, variants: List[Dict]) -> List[str]:
+        variant_urls = []
+        try:
+            product_id = self._extract_product_id(product_url)
+            if not product_id:
+                self.logger.error(f"ID de produit non trouvé pour {product_url}")
+                return [product_url]
+
+            variant_attributes = {}
+            for variant_group in variants:
+                if 'options' in variant_group and variant_group['options']:
+                    variant_attributes[variant_group['id']] = [option['id'] for option in variant_group['options']]
+
+            if not variant_attributes:
+                self.logger.warning(f"Pas d'attributs de variant valides pour {product_url}")
+                return [product_url]
+
+            attribute_ids = list(variant_attributes.keys())
+            option_combinations = list(product(*[variant_attributes[attr_id] for attr_id in attribute_ids]))
+
+            max_combinations = 20
+            if len(option_combinations) > max_combinations:
+                option_combinations = option_combinations[:max_combinations]
+
+            for combination in option_combinations:
+                filters = {str(attr_id): str(option_id) for attr_id, option_id in zip(attribute_ids, combination)}
+
+                variant_url_request = {
+                    "attribute": str(attribute_ids[0]),
+                    "value": str(combination[0]),
+                    "filters": filters
+                }
+
+                response = self.session.post(
+                    f"{self.base_url}/en_US/xhr/product/get_filter_attributes/{product_id}",
+                    json=variant_url_request,
+                    timeout=10
+                )
+
+                if response.status_code == 200:
+                    response_data = response.json()
+                    if response_data.get('num') == 1:
+                        variant_url = f"{self.base_url}{response_data['url']}"
+                        variant_urls.append(variant_url)
+
+            if not variant_urls:
+                self.logger.warning(f"Aucune URL de variant générée pour {product_url}")
+                return [product_url]
+
+        except Exception as e:
+            self.logger.error(f"Erreur lors de la génération des URLs de variant pour {product_url}: {e}")
+            return [product_url]
+
+        return variant_urls
+
+    def scrape_variant_urls(self, product_urls: List[str]):
+        for product_url in product_urls:
+            try:
+                variants = self.get_product_variants(product_url)
+
+                if variants:
+                    variant_urls = self.generate_variant_urls(product_url, variants)
+
+                    for variant_url in variant_urls:
+                        self.variant_urls.add(variant_url)
+
+            except Exception as e:
+                self.logger.error(f"Erreur lors du scraping des variants pour {product_url}: {e}")
+
+    def save_urls_to_csv(self, filename: str = 'forelle_variant_urls.csv'):
+        try:
+            with open(filename, 'w', newline='', encoding='utf-8') as csvfile:
+                writer = csv.writer(csvfile)
+                writer.writerow(['Product/Variant URL'])
+
+                for url in self.variant_urls:
+                    writer.writerow([url])
+
+            self.logger.info(f"Enregistrement terminé. Total d'URLs uniques : {len(self.variant_urls)}")
+            print(f"Sauvegardé {len(self.variant_urls)} URLs uniques dans {filename}")
+
+        except Exception as e:
+            self.logger.error(f"Erreur lors de l'enregistrement des URLs : {e}")
+
+    def run(self, product_urls: List[str]):
+        try:
+            self.scrape_variant_urls(product_urls)
+            self.save_urls_to_csv()
+
+        except Exception as e:
+            self.logger.error(f"Le processus de scraping a échoué : {e}")
+
+        finally:
+            self.driver.quit()
+
+
 def main():
+    # Scrape product URLs from category pages
     category_urls = [
         "https://www.forelle.com/en_US/gloves-lh-left-hand-catch/263/",
         "https://www.forelle.com/en_US/balls/272/",
@@ -229,6 +369,11 @@ def main():
 
     scraper = ForelleScraper()
     scraper.run(category_urls)
+
+    # Run variant scraper with the product URLs captured
+    product_urls = scraper.product_urls  # Capture product URLs from the first scraper
+    variant_scraper = ForelleVariantScraper()
+    variant_scraper.run(list(product_urls))
 
 
 if __name__ == "__main__":
