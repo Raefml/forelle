@@ -146,7 +146,7 @@ class ForelleScraper:
         except Exception as e:
             self.logger.error(f"Global error while extracting products: {e}")
 
-    def save_urls_to_csv(self, filename: str = 'forelle_product_urls.csv'):
+    def save_urls_to_csv(self, filename: str = 'forelle_product_urlss.csv'):
         try:
             with open(filename, 'w', newline='', encoding='utf-8') as csvfile:
                 writer = csv.writer(csvfile)
@@ -230,61 +230,73 @@ class ForelleVariantScraper:
             self.logger.error(f"Échec de la récupération des variants pour {product_url}. Code de statut : {response.status_code}")
             return []
 
+    from itertools import product
+
     def generate_variant_urls(self, product_url: str, variants: List[Dict]) -> List[str]:
         variant_urls = []
         try:
             product_id = self._extract_product_id(product_url)
             if not product_id:
-                self.logger.error(f"ID de produit non trouvé pour {product_url}")
+                self.logger.error(f"Product ID not found for {product_url}")
                 return [product_url]
 
-            variant_attributes = {}
-            for variant_group in variants:
-                if 'options' in variant_group and variant_group['options']:
-                    variant_attributes[variant_group['id']] = [option['id'] for option in variant_group['options']]
+            # Build variant attributes
+            size_variant = next((v for v in variants if v['name'] == 'Size'), None)
+            color_variant = next((v for v in variants if v['name'] == 'Variant'), None)
 
-            if not variant_attributes:
-                self.logger.warning(f"Pas d'attributs de variant valides pour {product_url}")
+            if not size_variant:
+                self.logger.warning(f"No size variants found for {product_url}")
                 return [product_url]
 
-            attribute_ids = list(variant_attributes.keys())
-            option_combinations = list(product(*[variant_attributes[attr_id] for attr_id in attribute_ids]))
+            # Get all size options
+            size_options = size_variant['options']
+            color_options = color_variant['options'] if color_variant else [None]
 
-            max_combinations = 20
-            if len(option_combinations) > max_combinations:
-                option_combinations = option_combinations[:max_combinations]
+            # Generate combinations
+            for size in size_options:
+                for color in color_options:
+                    filters = {
+                        str(size_variant['id']): str(size['id'])
+                    }
 
-            for combination in option_combinations:
-                filters = {str(attr_id): str(option_id) for attr_id, option_id in zip(attribute_ids, combination)}
+                    if color:
+                        filters[str(color_variant['id'])] = str(color['id'])
 
-                variant_url_request = {
-                    "attribute": str(attribute_ids[0]),
-                    "value": str(combination[0]),
-                    "filters": filters
-                }
+                    variant_url_request = {
+                        "attribute": str(size_variant['id']),
+                        "value": str(size['id']),
+                        "filters": filters
+                    }
 
-                response = self.session.post(
-                    f"{self.base_url}/en_US/xhr/product/get_filter_attributes/{product_id}",
-                    json=variant_url_request,
-                    timeout=10
-                )
+                    try:
+                        response = self.session.post(
+                            f"{self.base_url}/en_US/xhr/product/get_filter_attributes/{product_id}",
+                            json=variant_url_request,
+                            timeout=10
+                        )
 
-                if response.status_code == 200:
-                    response_data = response.json()
-                    if response_data.get('num') == 1:
-                        variant_url = f"{self.base_url}{response_data['url']}"
-                        variant_urls.append(variant_url)
+                        if response.status_code == 200:
+                            response_data = response.json()
+                            if response_data.get('url'):
+                                variant_url = f"{self.base_url}{response_data['url']}"
+                                variant_urls.append(variant_url)
+                                self.logger.info(f"Generated variant URL: {variant_url}")
+                        else:
+                            self.logger.error(f"API error for {product_url}, status: {response.status_code}")
+
+                    except Exception as e:
+                        self.logger.error(f"Error while making API request for variant: {e}")
+                        continue
 
             if not variant_urls:
-                self.logger.warning(f"Aucune URL de variant générée pour {product_url}")
+                self.logger.warning(f"No variant URLs generated for {product_url}")
                 return [product_url]
 
         except Exception as e:
-            self.logger.error(f"Erreur lors de la génération des URLs de variant pour {product_url}: {e}")
+            self.logger.error(f"Error while generating variant URLs for {product_url}: {e}")
             return [product_url]
 
         return variant_urls
-
     def scrape_variant_urls(self, product_urls: List[str]):
         for product_url in product_urls:
             try:
@@ -299,7 +311,7 @@ class ForelleVariantScraper:
             except Exception as e:
                 self.logger.error(f"Erreur lors du scraping des variants pour {product_url}: {e}")
 
-    def save_urls_to_csv(self, filename: str = 'forelle_variant_urls.csv'):
+    def save_urls_to_csv(self, filename: str = 'forelle_variant_urls2.csv'):
         try:
             with open(filename, 'w', newline='', encoding='utf-8') as csvfile:
                 writer = csv.writer(csvfile)
@@ -346,6 +358,7 @@ def main():
         "https://www.forelle.com/en_US/protective-gear/249/",
         "https://www.forelle.com/en_US/rawlings-luxury-leather-goods/369/",
         "https://www.forelle.com/en_US/american-football-helmets/259/",
+        "https://www.forelle.com/en_US/p/nike-vapor-jet-7-0-n-100-3505-xl-black/15000/",
         "https://www.forelle.com/en_US/gloves/257/",
         "https://www.forelle.com/en_US/training-equipment/319/",
         "https://www.forelle.com/en_US/field-equipment/355/",
@@ -371,7 +384,7 @@ def main():
     scraper.run(category_urls)
 
     # Run variant scraper with the product URLs captured
-    product_urls = scraper.product_urls  # Capture product URLs from the first scraper
+    product_urls = scraper.product_urls
     variant_scraper = ForelleVariantScraper()
     variant_scraper.run(list(product_urls))
 
