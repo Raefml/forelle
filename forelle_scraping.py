@@ -230,7 +230,6 @@ class ForelleVariantScraper:
             self.logger.error(f"Échec de la récupération des variants pour {product_url}. Code de statut : {response.status_code}")
             return []
 
-    from itertools import product
 
     def generate_variant_urls(self, product_url: str, variants: List[Dict]) -> List[str]:
         variant_urls = []
@@ -240,60 +239,59 @@ class ForelleVariantScraper:
                 self.logger.error(f"Product ID not found for {product_url}")
                 return [product_url]
 
-            # Build variant attributes
-            size_variant = next((v for v in variants if v['name'] == 'Size'), None)
-            color_variant = next((v for v in variants if v['name'] == 'Variant'), None)
+            # Extract all variant attributes dynamically
+            variant_attributes = {}
+            for variant_group in variants:
+                if 'options' in variant_group and variant_group['options']:
+                    variant_attributes[variant_group['id']] = [option['id'] for option in variant_group['options']]
 
-            if not size_variant:
-                self.logger.warning(f"No size variants found for {product_url}")
+            if not variant_attributes:
+                self.logger.warning(f"No valid variant attributes found for {product_url}")
                 return [product_url]
 
-            # Get all size options
-            size_options = size_variant['options']
-            color_options = color_variant['options'] if color_variant else [None]
+            # Generate all possible combinations
+            attribute_ids = list(variant_attributes.keys())
+            option_combinations = list(product(*[variant_attributes[attr_id] for attr_id in attribute_ids]))
 
-            # Generate combinations
-            for size in size_options:
-                for color in color_options:
-                    filters = {
-                        str(size_variant['id']): str(size['id'])
-                    }
+            max_combinations = 50  # Limit to prevent overload
+            if len(option_combinations) > max_combinations:
+                option_combinations = option_combinations[:max_combinations]
 
-                    if color:
-                        filters[str(color_variant['id'])] = str(color['id'])
+            for combination in option_combinations:
+                filters = {str(attr_id): str(option_id) for attr_id, option_id in zip(attribute_ids, combination)}
 
-                    variant_url_request = {
-                        "attribute": str(size_variant['id']),
-                        "value": str(size['id']),
-                        "filters": filters
-                    }
+                variant_url_request = {
+                    "attribute": str(attribute_ids[0]),
+                    "value": str(combination[0]),
+                    "filters": filters
+                }
 
-                    try:
-                        response = self.session.post(
-                            f"{self.base_url}/en_US/xhr/product/get_filter_attributes/{product_id}",
-                            json=variant_url_request,
-                            timeout=10
-                        )
+                try:
+                    response = self.session.post(
+                        f"{self.base_url}/en_US/xhr/product/get_filter_attributes/{product_id}",
+                        json=variant_url_request,
+                        timeout=10
+                    )
 
-                        if response.status_code == 200:
-                            response_data = response.json()
-                            if response_data.get('url'):
-                                variant_url = f"{self.base_url}{response_data['url']}"
-                                variant_urls.append(variant_url)
-                                self.logger.info(f"Generated variant URL: {variant_url}")
-                        else:
-                            self.logger.error(f"API error for {product_url}, status: {response.status_code}")
+                    if response.status_code == 200:
+                        response_data = response.json()
+                        if response_data.get('url'):
+                            variant_url = f"{self.base_url}{response_data['url']}"
+                            variant_urls.append(variant_url)
+                            self.logger.info(f"Generated variant URL: {variant_url}")
+                    else:
+                        self.logger.error(f"API error for {product_url}, status: {response.status_code}")
 
-                    except Exception as e:
-                        self.logger.error(f"Error while making API request for variant: {e}")
-                        continue
+                except Exception as e:
+                    self.logger.error(f"Error making API request for {product_url}: {e}")
+                    continue
 
             if not variant_urls:
                 self.logger.warning(f"No variant URLs generated for {product_url}")
                 return [product_url]
 
         except Exception as e:
-            self.logger.error(f"Error while generating variant URLs for {product_url}: {e}")
+            self.logger.error(f"Error generating variant URLs for {product_url}: {e}")
             return [product_url]
 
         return variant_urls
